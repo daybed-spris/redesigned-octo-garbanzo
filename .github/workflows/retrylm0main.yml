@@ -1,0 +1,51 @@
+name: Retry LM0
+
+on:
+  workflow_run:
+    workflows: ["LM0"]
+    types:
+      - canceled
+
+jobs:
+  retry:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: windows-latest
+
+    steps:
+      - name: Fetch past run count (via GitHub API)
+        id: check_runs
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "Checking past LiteManager runs..."
+          COUNT=$(curl -s -H "Authorization: token $GH_PAT" \
+            https://api.github.com/repos/$REPO/actions/runs?per_page=100 \
+            | jq '[.workflow_runs[] | select(.name == "LM0")] | length')
+
+          echo "LiteManager run count: $COUNT"
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Wait with backoff (1 minutes)
+        if: ${{ steps.check_runs.outputs.count < 6 }}
+        run: |
+          RETRY_DELAY=$((1 * 60))  # 5 minutes in seconds
+          echo "Waiting for $RETRY_DELAY seconds before retrying..."
+          sleep $RETRY_DELAY
+
+      - name: Re-trigger LiteManager if under 6 attempts
+        if: ${{ steps.check_runs.outputs.count < 6 }}
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "Retry attempt ${{ steps.check_runs.outputs.count }} of 6..."
+          curl -X POST \
+            -H "Authorization: token $GH_PAT" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/$REPO/actions/workflows/main.yml/dispatches \
+            -d '{"ref":"main"}'
+
+      - name: Stop retries after 6 attempts
+        if: ${{ steps.check_runs.outputs.count >= 6 }}
+        run: echo "Retry limit reached. No further attempts will be made."
